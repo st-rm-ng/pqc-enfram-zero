@@ -23,5 +23,5 @@ override.tf.json
 .terraformrc
 terraform.rc
 
-# Ignore lock file (can be committed, but often excluded)
-# .terraform.lock.hcl
+# Ignore locally created plans
+*tfplan
