@@ -6,7 +6,7 @@
 
     <groupId>org.pqc.enframzero</groupId>
     <artifactId>pqc-enfram-zero</artifactId>
-    <version>1.1.0</version>
+    <version>1.2.0</version>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
@@ -15,6 +15,10 @@
         <bc.version>1.80</bc.version>
         <awssdk.version>2.29.52</awssdk.version>
         <junit.version>5.11.4</junit.version>
+        <!-- Override on the command line to run integration tests:
+             mvn test -Dtest.excludedGroups= -Dtest.groups=integration -->
+        <test.excludedGroups>integration</test.excludedGroups>
+        <test.groups></test.groups>
     </properties>
 
     <dependencyManagement>
@@ -49,6 +53,12 @@
             <artifactId>auth</artifactId>
         </dependency>
 
+        <!-- AWS SDK v2 KMS (keystore blob encryption) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>kms</artifactId>
+        </dependency>
+
         <!-- JUnit 5 -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -73,7 +83,16 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
                 <configuration>
-                    <excludedGroups>integration</excludedGroups>
+                    <excludedGroups>${test.excludedGroups}</excludedGroups>
+                    <groups>${test.groups}</groups>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <mainClass>org.pqc.enframzero.FrameworkDemo</mainClass>
                 </configuration>
             </plugin>
         </plugins>

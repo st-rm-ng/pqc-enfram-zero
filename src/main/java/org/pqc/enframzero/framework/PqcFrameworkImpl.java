@@ -71,12 +71,23 @@ public class PqcFrameworkImpl implements PqcFramework {
      * @param region    the AWS region (e.g. "eu-central-1")
      */
     public static PqcFrameworkImpl create(String tableName, String region) {
+        return create(tableName, region, new InMemoryKeyManager().generateKeys());
+    }
+
+    /**
+     * Convenience factory that wires all implementations using the supplied key bundle.
+     * Use this to restore a previously persisted bundle loaded via {@link org.pqc.enframzero.keys.KmsBlobKeyStore}.
+     *
+     * @param tableName the DynamoDB table name to use
+     * @param region    the AWS region (e.g. "eu-central-1")
+     * @param keyBundle existing key material (caller retains ownership; not destroyed here)
+     */
+    public static PqcFrameworkImpl create(String tableName, String region, PqcKeyBundle keyBundle) {
         AesGcmService aesGcm = new AesGcmServiceImpl();
         MlKemService mlKem = new MlKemServiceImpl();
         MlDsaService mlDsa = new MlDsaServiceImpl();
         KeyOnion keyOnion = new KeyOnion(aesGcm);
         ValueOnion valueOnion = new ValueOnion(aesGcm);
-        PqcKeyBundle keyBundle = new InMemoryKeyManager().generateKeys();
         DynamoDbClient dynamoDbClient = DynamoDbClient.builder()
                 .region(Region.of(region))
                 .build();
