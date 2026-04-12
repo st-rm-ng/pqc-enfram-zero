@@ -75,10 +75,11 @@ pqc-enfram-zero/
     │   ├── store/
     │   │   ├── EncryptedStore.java
     │   │   └── DynamoDbEncryptedStore.java
-    │   └── framework/
-    │       ├── PqcFramework.java
-    │       ├── PqcFrameworkImpl.java
-    │       └── IntegrityException.java
+    │   ├── framework/
+    │   │   ├── PqcFramework.java
+    │   │   ├── PqcFrameworkImpl.java
+    │   │   └── IntegrityException.java
+    │   └── FrameworkDemo.java
     └── test/java/org/pqc/enframzero/
         ├── crypto/
         │   ├── AesGcmServiceImplTest.java
@@ -248,6 +249,14 @@ fw2.getString("user:alice").orElseThrow();
 [4-byte length][KMS-encrypted AES-256 data key] [AES-GCM( serialised PqcKeyBundle )]
 ```
 The plaintext data key exists only in JVM heap during save/load and is zeroed immediately after use.
+
+### Demo
+
+```bash
+mvn exec:java -Dexec.mainClass=org.pqc.enframzero.FrameworkDemo
+```
+
+runs **[FrameworkDemo.java](src/main/java/org/pqc/enframzero/FrameworkDemo.java)** — 8 scenarios against live DynamoDB + KMS
 
 ## Algorithms
 
