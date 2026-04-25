@@ -26,6 +26,7 @@ import java.util.Optional;
 public class DynamoDbEncryptedStore implements EncryptedStore {
 
     private static final String ATTR_PK = "pk";
+    private static final String ATTR_KID = "kid";
     private static final String ATTR_KEM = "kem";
     private static final String ATTR_PAYLOAD = "payload";
     private static final String ATTR_SIG = "sig";
@@ -44,6 +45,7 @@ public class DynamoDbEncryptedStore implements EncryptedStore {
                 .tableName(tableName)
                 .item(Map.of(
                         ATTR_PK,      AttributeValue.fromS(deterministicKey),
+                        ATTR_KID,     AttributeValue.fromS(envelope.keyId()),
                         ATTR_KEM,     AttributeValue.fromB(SdkBytes.fromByteArray(envelope.kemEncapsulation())),
                         ATTR_PAYLOAD, AttributeValue.fromB(SdkBytes.fromByteArray(envelope.encryptedPayload())),
                         ATTR_SIG,     AttributeValue.fromB(SdkBytes.fromByteArray(envelope.dsaSignature()))
@@ -63,7 +65,10 @@ public class DynamoDbEncryptedStore implements EncryptedStore {
         }
 
         Map<String, AttributeValue> item = response.item();
+        AttributeValue kidAttr = item.get(ATTR_KID);
+        String keyId = kidAttr != null ? kidAttr.s() : "master";
         return Optional.of(new TransitEnvelope(
+                keyId,
                 item.get(ATTR_KEM).b().asByteArray(),
                 item.get(ATTR_PAYLOAD).b().asByteArray(),
                 item.get(ATTR_SIG).b().asByteArray()

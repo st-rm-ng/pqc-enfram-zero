@@ -5,6 +5,7 @@ package org.pqc.enframzero.onion;
  * All fields are opaque byte arrays stored as DynamoDB Binary (B) attributes.
  *
  * <ul>
+ *   <li>{@code keyId}            — identifies which key bundle encrypted this row</li>
  *   <li>{@code kemEncapsulation} — ML-KEM ciphertext encapsulating the ephemeral transit key</li>
  *   <li>{@code encryptedPayload} — AES-GCM(transitKey, serialise(deterministicKey, encryptedValue))</li>
  *   <li>{@code dsaSignature}     — ML-DSA signature over (kemEncapsulation || encryptedPayload)</li>
@@ -14,6 +15,7 @@ package org.pqc.enframzero.onion;
  * nested inside the ML-KEM transit layer, realising the two-layer onion encryption.
  */
 public record TransitEnvelope(
+        String keyId,
         byte[] kemEncapsulation,
         byte[] encryptedPayload,
         byte[] dsaSignature

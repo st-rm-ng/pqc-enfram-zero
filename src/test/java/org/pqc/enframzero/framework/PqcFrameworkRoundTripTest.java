@@ -6,6 +6,7 @@ import org.pqc.enframzero.crypto.AesGcmServiceImpl;
 import org.pqc.enframzero.crypto.MlDsaServiceImpl;
 import org.pqc.enframzero.crypto.MlKemServiceImpl;
 import org.pqc.enframzero.keys.InMemoryKeyManager;
+import org.pqc.enframzero.keys.KeyBundleRegistry;
 import org.pqc.enframzero.keys.PqcKeyBundle;
 import org.pqc.enframzero.onion.KeyOnion;
 import org.pqc.enframzero.onion.TransitEnvelope;
@@ -21,21 +22,26 @@ import static org.junit.jupiter.api.Assertions.*;
 class PqcFrameworkRoundTripTest {
 
     private PqcFramework framework;
+    private InMemoryEncryptedStore store;
 
     @BeforeEach
     void setUp() {
         var aesGcm = new AesGcmServiceImpl();
-        PqcKeyBundle bundle = new InMemoryKeyManager().generateKeys();
+        var keyManager = new InMemoryKeyManager();
+        KeyBundleRegistry registry = new KeyBundleRegistry(keyManager.generateKeys(), keyManager);
+        store = new InMemoryEncryptedStore();
         framework = new PqcFrameworkImpl(
-                bundle,
+                registry,
                 new MlKemServiceImpl(),
                 new MlDsaServiceImpl(),
                 aesGcm,
                 new KeyOnion(aesGcm),
                 new ValueOnion(aesGcm),
-                new InMemoryEncryptedStore()
+                store
         );
     }
+
+    // ── master-bundle tests (backward-compatible) ────────────────────────────
 
     @Test
     void putAndGetString_roundTrip() {
@@ -84,24 +90,88 @@ class PqcFrameworkRoundTripTest {
     @Test
     void get_tamperedEnvelope_throwsIntegrityException() {
         var aesGcm = new AesGcmServiceImpl();
-        PqcKeyBundle bundle = new InMemoryKeyManager().generateKeys();
-        InMemoryEncryptedStore store = new InMemoryEncryptedStore();
+        var keyManager = new InMemoryKeyManager();
+        KeyBundleRegistry registry = new KeyBundleRegistry(keyManager.generateKeys(), keyManager);
+        InMemoryEncryptedStore tamperedStore = new InMemoryEncryptedStore();
         PqcFramework fw = new PqcFrameworkImpl(
-                bundle,
+                registry,
                 new MlKemServiceImpl(),
                 new MlDsaServiceImpl(),
                 aesGcm,
                 new KeyOnion(aesGcm),
                 new ValueOnion(aesGcm),
-                store
+                tamperedStore
         );
 
         fw.putString("secret", "value");
-        // Tamper with the stored envelope's signature
-        store.tamperSignature("secret");
+        tamperedStore.tamperSignature("secret");
 
         assertThrows(IntegrityException.class, () -> fw.getString("secret"));
     }
+
+    // ── multi-bundle tests ───────────────────────────────────────────────────
+
+    @Test
+    void put_namedBundle_roundTrip() {
+        framework.putString("session:xyz", "data", "bundle-b");
+        Optional<String> result = framework.getString("session:xyz", "bundle-b");
+        assertTrue(result.isPresent());
+        assertEquals("data", result.get());
+    }
+
+    @Test
+    void put_namedBundle_autoCreaesBundle() {
+        // "bundle-c" does not exist yet — should be auto-created
+        assertDoesNotThrow(() -> framework.putString("new-key", "hello", "bundle-c"));
+        assertEquals("hello", framework.getString("new-key", "bundle-c").orElseThrow());
+    }
+
+    @Test
+    void put_masterAndNamedBundle_storedUnderDifferentPartitionKeys() {
+        // Same logical key written with two different bundles must produce two separate rows
+        framework.putString("shared-key", "master-value");
+        framework.putString("shared-key", "bundle-b-value", "bundle-b");
+
+        assertEquals("master-value", framework.getString("shared-key").orElseThrow());
+        assertEquals("bundle-b-value", framework.getString("shared-key", "bundle-b").orElseThrow());
+        assertEquals(2, store.size());
+    }
+
+    @Test
+    void get_namedBundle_wrongBundleCannotDecrypt() {
+        // Register "bundle-b" by writing a different key with it, then write "key" with master.
+        // Reading "key" with "bundle-b" must miss because the HMAC(bundleBDEK, "key") ≠ HMAC(masterDEK, "key").
+        framework.put("warmup", new byte[]{0}, "bundle-b");
+        framework.putString("key", "secret");
+        Optional<String> result = framework.getString("key", "bundle-b");
+        assertTrue(result.isEmpty(), "Different bundle derives a different partition key → miss");
+    }
+
+    @Test
+    void get_unregisteredBundle_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class,
+                () -> framework.getString("any-key", "bundle-never-registered"));
+    }
+
+    @Test
+    void delete_namedBundle_removesOnlyThatEntry() {
+        framework.putString("key", "master-value");
+        framework.putString("key", "bundle-b-value", "bundle-b");
+
+        framework.delete("key", "bundle-b");
+
+        assertEquals("master-value", framework.getString("key").orElseThrow());
+        assertTrue(framework.getString("key", "bundle-b").isEmpty());
+    }
+
+    @Test
+    void storedEnvelope_hasCorrectKid() {
+        framework.putString("k", "v", "bundle-b");
+        // All stored envelopes should carry kid = "bundle-b"
+        store.allEnvelopes().forEach(e -> assertEquals("bundle-b", e.keyId()));
+    }
+
+    // ── helper store ─────────────────────────────────────────────────────────
 
     /** Simple in-memory store for testing, backed by a HashMap. */
     static class InMemoryEncryptedStore implements EncryptedStore {
@@ -122,13 +192,21 @@ class PqcFrameworkRoundTripTest {
             data.remove(key);
         }
 
-        /** Flips a byte in the signature of every stored envelope matching the logical key prefix. */
-        public void tamperSignature(String logicalKeyPrefix) {
+        public int size() {
+            return data.size();
+        }
+
+        public java.util.Collection<TransitEnvelope> allEnvelopes() {
+            return data.values();
+        }
+
+        /** Flips a byte in the signature of every stored envelope. */
+        public void tamperSignature(String ignored) {
             for (Map.Entry<String, TransitEnvelope> entry : data.entrySet()) {
                 TransitEnvelope e = entry.getValue();
                 byte[] tampered = e.dsaSignature().clone();
                 tampered[tampered.length / 2] ^= 0xFF;
-                data.put(entry.getKey(), new TransitEnvelope(e.kemEncapsulation(), e.encryptedPayload(), tampered));
+                data.put(entry.getKey(), new TransitEnvelope(e.keyId(), e.kemEncapsulation(), e.encryptedPayload(), tampered));
             }
         }
     }

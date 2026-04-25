@@ -77,8 +77,9 @@ class KeyBundleSerializerTest {
 
     private static PqcFramework buildFramework(PqcKeyBundle bundle, EncryptedStore store,
                                                 org.pqc.enframzero.crypto.AesGcmService aesGcm) {
+        KeyBundleRegistry registry = new KeyBundleRegistry(bundle, new InMemoryKeyManager());
         return new PqcFrameworkImpl(
-                bundle,
+                registry,
                 new org.pqc.enframzero.crypto.MlKemServiceImpl(),
                 new org.pqc.enframzero.crypto.MlDsaServiceImpl(),
                 aesGcm,

@@ -65,6 +65,7 @@ pqc-enfram-zero/
     │   │   ├── PqcKeyBundle.java
     │   │   ├── PqcKeyManager.java
     │   │   ├── InMemoryKeyManager.java
+    │   │   ├── KeyBundleRegistry.java
     │   │   ├── KeyBundleSerializer.java
     │   │   └── KmsBlobKeyStore.java
     │   ├── onion/
@@ -115,6 +116,7 @@ pqc-enfram-zero/
 - **PqcKeyBundle.java** — `AutoCloseable` container holding the ML-KEM-1024 keypair, ML-DSA-65 keypair, and 32-byte AES-256 DEK; `destroy()` zeroes the DEK bytes in-place
 - **PqcKeyManager.java** — Interface: `generateKeys() → PqcKeyBundle`
 - **InMemoryKeyManager.java** — Generates ML-KEM-1024 + ML-DSA-65 keypairs and a random AES-256 DEK; all key material lives only in JVM heap, never written to disk
+- **KeyBundleRegistry.java** — Thread-safe named registry of `PqcKeyBundle` instances; always contains a `"master"` bundle; `getOrCreate(id)` auto-generates a new bundle if the id is not yet registered; callers are responsible for persisting auto-generated bundles via `KmsBlobKeyStore`
 - **KeyBundleSerializer.java** — Serialises all five key components to a compact binary format (`[4-byte length][bytes]` per field); used internally by `KmsBlobKeyStore`
 - **KmsBlobKeyStore.java** — Persists a `PqcKeyBundle` across JVM restarts using KMS envelope encryption: `GenerateDataKey` → AES-GCM encrypt the serialised bundle → write blob to file; on load: `Decrypt` the envelope DEK → AES-GCM decrypt → deserialise
 
@@ -123,17 +125,17 @@ pqc-enfram-zero/
 - **OnionLayer.java** — Enum with three levels: `PLAIN` (no transformation), `DET` (deterministic — same input always produces the same output), `RND` (randomised — fresh IV per call)
 - **KeyOnion.java** — Transforms plaintext keys per layer: `DET` = `HMAC-SHA256(DEK, key)` encoded as Base64URL; `RND` = `AES-GCM(DEK, key)`; `PLAIN` = passthrough
 - **ValueOnion.java** — At-rest encryption layer: `AES-GCM(DEK, value)` with a fresh 12-byte random IV per write; same value written twice always produces different ciphertext
-- **TransitEnvelope.java** — Immutable record carrying `kemEncapsulation`, `encryptedPayload`, and `dsaSignature`; inner payload is serialised as `[4-byte length][deterministicKey][encryptedValue]`
+- **TransitEnvelope.java** — Immutable record carrying `keyId`, `kemEncapsulation`, `encryptedPayload`, and `dsaSignature`; `keyId` identifies which bundle encrypted the row; inner payload is serialised as `[4-byte length][deterministicKey][encryptedValue]`
 
 ### `org.pqc.enframzero.store`
 
 - **EncryptedStore.java** — Interface: `put(deterministicKey, TransitEnvelope)` / `get(deterministicKey) → Optional<TransitEnvelope>` / `delete(deterministicKey)`; implement this to target any KV backend
-- **DynamoDbEncryptedStore.java** — AWS DynamoDB implementation: maps `TransitEnvelope` fields to Binary attributes (`pk`, `kem`, `payload`, `sig`) and back using AWS SDK v2 `DynamoDbClient`
+- **DynamoDbEncryptedStore.java** — AWS DynamoDB implementation: maps `TransitEnvelope` fields to Binary attributes (`pk`, `kid`, `kem`, `payload`, `sig`) and back using AWS SDK v2 `DynamoDbClient`; rows without a `kid` attribute (written before multi-bundle support) default to `"master"`
 
 ### `org.pqc.enframzero.framework`
 
-- **PqcFramework.java** — Public API interface: `put(key, byte[])`, `get(key) → Optional<byte[]>`, `delete(key)`; default `putString` / `getString` convenience overloads (UTF-8)
-- **PqcFrameworkImpl.java** — Wires all modules together and orchestrates the full encryption/decryption flow; `create(table, region)` generates a fresh key bundle; `create(table, region, bundle)` accepts an existing `PqcKeyBundle` loaded from `KmsBlobKeyStore`
+- **PqcFramework.java** — Public API interface: no-arg `put`/`get`/`delete` use the master bundle; `put(key, value, bundleId)` / `get(key, bundleId)` / `delete(key, bundleId)` overloads use a named bundle (auto-created if missing on `put`); default `putString` / `getString` convenience overloads (UTF-8) in both forms
+- **PqcFrameworkImpl.java** — Wires all modules together and orchestrates the full encryption/decryption flow; `create(table, region)` generates a fresh master bundle; `create(table, region, bundle)` accepts an existing `PqcKeyBundle`; `create(table, region, registry)` accepts a pre-populated `KeyBundleRegistry`
 - **IntegrityException.java** — Unchecked exception thrown by `get()` when ML-DSA signature verification fails, indicating the stored envelope was tampered with
 
 ## Requirements
@@ -157,11 +159,11 @@ pqc-enfram-zero/
 | `onion/KeyOnionTest` | Unit | 6 | DET determinism, RND randomness, Base64URL encoding |
 | `onion/ValueOnionTest` | Unit | 3 | Round-trip, random ciphertext per write |
 | `onion/TransitEnvelopeTest` | Unit | 3 | Serialise/deserialise, signInput concatenation |
-| `framework/PqcFrameworkRoundTripTest` | Unit | 7 | put/get, overwrite, delete, multi-key, integrity check |
+| `framework/PqcFrameworkRoundTripTest` | Unit | 14 | put/get, overwrite, delete, multi-key, integrity check, multi-bundle round-trip, auto-creation, cross-bundle isolation |
 | `keys/KmsBlobKeyStoreIntegrationTest` | Integration | 2 | Save/load round-trip via KMS, cross-restart read of existing DynamoDB data |
 | `store/DynamoDbEncryptedStoreIntegrationTest` | Integration | 1 | put/get/delete against a live DynamoDB table |
 
-**39 unit tests** — no AWS infrastructure required.
+**46 unit tests** — no AWS infrastructure required.
 **3 integration tests** — tagged `@Tag("integration")` and excluded by default.
 
 ## Build & Test
@@ -224,6 +226,29 @@ Optional<byte[]> blob = fw.get("blob:1");
 fw.delete("user:alice");
 ```
 
+### Multi-Bundle Encryption
+
+By default every row is encrypted with the master key bundle. Pass an explicit `bundleId` to use (or auto-create) a separate bundle for specific rows:
+
+```java
+PqcFramework fw = PqcFrameworkImpl.create("pqc-items-dev", "eu-central-1");
+
+// Master bundle — default, no bundleId needed
+fw.putString("user:alice", "{\"role\":\"admin\"}");
+fw.getString("user:alice");  // reads back with master
+
+// Named bundle — auto-created on first use, stored as kid="audit-log" in DynamoDB
+fw.putString("audit:2026-04-25", "login event", "audit-log");
+fw.getString("audit:2026-04-25", "audit-log");  // must use same bundleId to read back
+
+// Pre-populate a registry with an existing bundle loaded from KmsBlobKeyStore
+KeyBundleRegistry registry = new KeyBundleRegistry(masterBundle, new InMemoryKeyManager());
+registry.register("audit-log", keyStore.load(Path.of("audit-log.enc")));
+PqcFramework fw2 = PqcFrameworkImpl.create("pqc-items-dev", "eu-central-1", registry);
+```
+
+> **Note:** Auto-created bundles live only in JVM heap. Persist them with `KmsBlobKeyStore.save()` before the process exits or the rows encrypted by them become permanently unreadable.
+
 ### Key Persistence
 
 `PqcFrameworkImpl.create()` generates a fresh key bundle on every call — keys are held only in JVM memory. Without the same bundle, data written in a previous process is permanently unreadable. Use `KmsBlobKeyStore` to persist the bundle across restarts:
@@ -263,6 +288,7 @@ The plaintext data key exists only in JVM heap during save/load and is zeroed im
 | Attribute | Type | Content |
 |-----------|------|---------|
 | `pk` | S | HMAC-SHA256(DEK, plainKey) — Base64URL, no padding |
+| `kid` | S | Key bundle ID that encrypted this row (e.g. `"master"`, `"bundle-b"`) |
 | `kem` | B | ML-KEM-1024 encapsulation ciphertext |
 | `payload` | B | AES-GCM(transitKey, serialised payload) |
 | `sig` | B | ML-DSA-65 signature over `kem ‖ payload` |

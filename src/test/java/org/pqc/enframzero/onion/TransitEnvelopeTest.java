@@ -33,7 +33,7 @@ class TransitEnvelopeTest {
         byte[] kem = new byte[]{1, 2, 3};
         byte[] payload = new byte[]{4, 5, 6};
         byte[] sig = new byte[]{0};
-        TransitEnvelope envelope = new TransitEnvelope(kem, payload, sig);
+        TransitEnvelope envelope = new TransitEnvelope("master", kem, payload, sig);
         byte[] combined = envelope.signInput();
         assertEquals(6, combined.length);
         assertEquals(1, combined[0]);
