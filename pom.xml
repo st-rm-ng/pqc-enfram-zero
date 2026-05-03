@@ -17,7 +17,7 @@
         <junit.version>5.11.4</junit.version>
         <!-- Override on the command line to run integration tests:
              mvn test -Dtest.excludedGroups= -Dtest.groups=integration -->
-        <test.excludedGroups>integration</test.excludedGroups>
+        <test.excludedGroups>integration,benchmark</test.excludedGroups>
         <test.groups></test.groups>
     </properties>
 
