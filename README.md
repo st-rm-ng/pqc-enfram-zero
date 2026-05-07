@@ -9,7 +9,7 @@ PQC EnFram Zero adapts [CryptDB](https://css.csail.mit.edu/cryptdb/)'s onion enc
 ### Security Principles
 
 1. **Client-only plaintext** — no plaintext ever leaves the JVM process
-2. **ML-KEM for data-in-transit** — a fresh ephemeral ML-KEM-1024 shared secret is generated per operation (forward secrecy per call)
+2. **ML-KEM for data-in-transit** — a fresh ephemeral ML-KEM-1024 shared secret is encapsulated per write and stored alongside the ciphertext; transit key confidentiality is quantum-resistant
 3. **AES-256-GCM for data-at-rest** — symmetric encryption with a random IV per write; same value written twice produces different ciphertext
 4. **ML-DSA integrity** — every stored item is signed with ML-DSA-65; tampering is detected before decryption
 5. **Encrypted queries** — DynamoDB partition keys are HMAC-SHA256 derivations of the plaintext key; key content is never exposed to the server
@@ -81,6 +81,10 @@ pqc-enfram-zero/
     │       ├── PqcFrameworkImpl.java
     │       └── IntegrityException.java
     └── test/java/org/pqc/enframzero/
+        ├── benchmark/
+        │   ├── BenchmarkSuite.java
+        │   ├── CloudBenchmarkSuite.java
+        │   └── InMemoryEncryptedStore.java
         ├── crypto/
         │   ├── AesGcmServiceImplTest.java
         │   ├── MlKemServiceImplTest.java
@@ -162,9 +166,12 @@ pqc-enfram-zero/
 | `framework/PqcFrameworkRoundTripTest` | Unit | 14 | put/get, overwrite, delete, multi-key, integrity check, multi-bundle round-trip, auto-creation, cross-bundle isolation |
 | `keys/KmsBlobKeyStoreIntegrationTest` | Integration | 2 | Save/load round-trip via KMS, cross-restart read of existing DynamoDB data |
 | `store/DynamoDbEncryptedStoreIntegrationTest` | Integration | 1 | put/get/delete against a live DynamoDB table |
+| `benchmark/BenchmarkSuite` | Benchmark | 1 | Primitive latency (ML-KEM, ML-DSA, AES-GCM, HMAC), classical comparison (ECDH-P256, ECDSA-P256), in-memory framework put/get, storage overhead |
+| `benchmark/CloudBenchmarkSuite` | Benchmark | 1 | Key management overhead, AWS KMS call latency, real DynamoDB put/get with full network round-trip |
 
 **46 unit tests** — no AWS infrastructure required.
 **3 integration tests** — tagged `@Tag("integration")` and excluded by default.
+**2 benchmark suites** — tagged `@Tag("benchmark")` / `@Tag("cloud-benchmark")` and excluded by default.
 
 ## Build & Test
 
@@ -182,6 +189,17 @@ mvn test
 ```bash
 PQC_TABLE_NAME=pqc-items-dev PQC_KMS_KEY_ALIAS=alias/pqc-keystore-dev \
   mvn test -Dtest.excludedGroups= -Dtest.groups=integration
+```
+
+**Cryptographic benchmarks** — no AWS required; runs on the local JVM only
+```bash
+mvn test -Dtest=BenchmarkSuite
+```
+
+**Cloud benchmarks** — requires deployed DynamoDB + KMS; measures real network latency and KMS call overhead
+```bash
+PQC_TABLE_NAME=pqc-items-dev PQC_KMS_KEY_ALIAS=alias/pqc-keystore-dev \
+  mvn test -Dtest=CloudBenchmarkSuite
 ```
 
 ## Infrastructure
@@ -273,6 +291,63 @@ fw2.getString("user:alice").orElseThrow();
 [4-byte length][KMS-encrypted AES-256 data key] [AES-GCM( serialised PqcKeyBundle )]
 ```
 The plaintext data key exists only in JVM heap during save/load and is zeroed immediately after use.
+
+## Performance
+
+Measured on AArch64 (Apple M-series), OpenJDK 25, n=1000 per primitive / n=500 per framework operation / n=50 per cloud operation.
+
+### Cryptographic primitives
+
+| Operation | Mean | Notes |
+|-----------|------|-------|
+| ML-KEM-1024 Encapsulation | 61.6 µs | vs. ECDH-P256 key agreement: 134.7 µs (2.2× faster) |
+| ML-KEM-1024 Decapsulation | 58.1 µs | |
+| ML-DSA-65 Signing | 137.7 µs | vs. ECDSA-P256 signing: 63.0 µs (2.2× slower) |
+| ML-DSA-65 Verification | 86.6 µs | |
+| AES-256-GCM Encrypt 256 B | 18.5 µs | |
+| HMAC-SHA256 key derivation | 3.3 µs | |
+
+### Framework operations (in-memory store, crypto only)
+
+| Operation | Mean | Dominant cost |
+|-----------|------|---------------|
+| `put()` 256 B value | 395 µs | ML-KEM encaps (62 µs) + ML-DSA sign (138 µs) |
+| `get()` 256 B value | 147 µs | ML-KEM decaps (58 µs) + ML-DSA verify (87 µs) |
+
+### Real cloud deployment (eu-central-1, n=50)
+
+| Operation | Mean | Notes |
+|-----------|------|-------|
+| DynamoDB PutItem baseline (unencrypted) | 25.2 ms | network RTT only |
+| DynamoDB GetItem baseline (unencrypted) | 25.0 ms | |
+| Framework `put()` 256 B (encrypted) | 29.8 ms | +4.6 ms over baseline; PQC = 1.3% of total |
+| Framework `get()` 256 B (encrypted) | 26.6 ms | +1.6 ms over baseline; PQC = 0.6% of total |
+| AWS KMS `GenerateDataKey` | 28.1 ms | per-record KMS pattern would add this per write |
+| AWS KMS `Decrypt` | 27.3 ms | paid once per bundle load (not per record) |
+
+**Key comparison:** ML-KEM encapsulation (61.6 µs) replaces a per-record KMS `GenerateDataKey` call (28.1 ms) — **456× faster**, while providing post-quantum security.
+
+### Key management (one-time costs)
+
+| Operation | Mean |
+|-----------|------|
+| Key bundle generation (ML-KEM-1024 + ML-DSA-65 + AES-256) | 740 µs |
+| Key bundle serialization (~10 KB) | 7.5 µs |
+| Key bundle deserialization (~10 KB) | 133 µs |
+
+### Storage overhead per encrypted record
+
+| Plaintext value | Stored bytes | Overhead ratio |
+|----------------|-------------|----------------|
+| 64 B | 5,093 B | 79.6× |
+| 256 B | 5,285 B | 20.6× |
+| 1,024 B | 6,053 B | 5.9× |
+| 4,096 B | 9,125 B | 2.2× |
+| 65,536 B | 70,565 B | 1.1× |
+
+Fixed overhead per record: **4,926 B** (ML-DSA-65 signature 3,309 B + ML-KEM-1024 encapsulation 1,568 B + partition key 43 B + bundle ID 6 B).
+
+---
 
 ## Algorithms
 
